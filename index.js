@@ -10,27 +10,28 @@ let sock; // Aquí guardaremos la conexión
 
 async function connectToWhatsApp() {
     // 1. Crear/Cargar la sesión
-    // Esto crea una carpeta 'auth_info_baileys' donde guarda las credenciales
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    // 2. Iniciar el socket (el cliente de WA)
+    // 2. Iniciar el socket
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, // ¡Importante! Imprime el QR en la consola de Render
-        logger: pino({ level: 'silent' }) // Para que no llene la consola de basura
+        printQRInTerminal: false, // <--- CAMBIO 1: Lo ponemos en false
+        logger: pino({ level: 'silent' })
     });
 
-    // 3. Manejar eventos de conexión (Si se cae, reconecta)
+    // 3. Manejar eventos de conexión
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log('⚠️ ESCANEA EL CÓDIGO QR DE ARRIBA CON TU WHATSAPP');
+            console.log('⚠️ ESCANEA EL CÓDIGO QR ABAJO CON TU WHATSAPP:');
+            // <--- CAMBIO 2: Dibujamos el QR manualmente
+            qrcode.generate(qr, { small: true }); 
         }
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Conexión cerrada por:', lastDisconnect.error, ', reconectando...', shouldReconnect);
+            console.log('Conexión cerrada, reconectando...', shouldReconnect);
             if (shouldReconnect) {
                 connectToWhatsApp();
             }
@@ -39,7 +40,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // 4. Guardar credenciales cada vez que cambian
+    // 4. Guardar credenciales
     sock.ev.on('creds.update', saveCreds);
 }
 
@@ -87,6 +88,11 @@ app.post('/enviar-mensaje', async (req, res) => {
         console.error('Error enviando:', error);
         res.status(500).json({ error: 'Error interno al enviar mensaje' });
     }
+});
+
+// Ruta base para mantener vivo el servidor
+app.get('/', (req, res) => {
+    res.send('EL BOT ESTÁ VIVO 🤖');
 });
 
 // Arrancar el servidor Express
