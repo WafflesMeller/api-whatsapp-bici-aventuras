@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "cors": "^2.8.5",
     "express": "^5.2.1",
     "pino": "^10.1.0",
     "qrcode-terminal": "^0.12.0"

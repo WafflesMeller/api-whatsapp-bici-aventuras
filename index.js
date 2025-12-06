@@ -2,10 +2,11 @@ const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whis
 const express = require('express');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
+const cors = require('cors'); // <--- NUEVO: Importar cors
 
 const app = express();
 app.use(express.json()); // Para que entienda los datos que le manda Vercel
-
+app.use(cors()); // <--- NUEVO: Usar cors para permitir solicitudes desde cualquier origen
 let sock; // Aquí guardaremos la conexión
 
 async function connectToWhatsApp() {
