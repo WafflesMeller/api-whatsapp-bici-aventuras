@@ -37,7 +37,7 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: true, // Lo dejamos en true por si quieres debugear en Render
         logger: pino({ level: 'silent' }),
-        browser: ["BiciAventuras Bot", "Chrome", "1.0.0"] // Para que se vea bonito en WhatsApp
+        browser: ["BiciAventuras", "Chrome", "1.0.0"] // Para que se vea bonito en WhatsApp
     });
 
     sock.ev.on('connection.update', (update) => {
