@@ -73,8 +73,9 @@ async function connectToWhatsApp() {
             log('ERROR', `Conexión cerrada (${lastDisconnect?.error?.message})`);
 
             if (shouldReconnect) {
-                // 🔥 MISMO COMPORTAMIENTO QUE EL CÓDIGO VIEJO
-                connectToWhatsApp();
+                setTimeout(() => {
+                    connectToWhatsApp();
+                }, 4000);
             } else {
                 log('CRITICAL', 'Logout real detectado');
                 clearAuthFolder();
