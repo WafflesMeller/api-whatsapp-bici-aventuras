@@ -1,42 +1,70 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
-const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const cors = require('cors');
-const multer = require('multer'); // <--- NUEVO: Importamos Multer
+const multer = require('multer');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// --- CONFIGURACIÓN DE MULTER (Para recibir archivos) ---
-// Usamos memoryStorage para guardar la imagen en la RAM temporalmente (más rápido en Render)
 const upload = multer({ storage: multer.memoryStorage() });
 
 let sock;
+let status = 'disconnected'; // 'disconnected', 'connecting', 'connected'
+let qrCode = null; // Aquí guardaremos el QR para enviarlo al frontend
+
+// LOGGER DETALLADO
+const log = (msg) => {
+    console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+};
 
 async function connectToWhatsApp() {
+    // ⛔ SI YA HAY SOCKET, NO CREAR OTRO
+    if (sock) {
+        log('Socket ya existe, evitando duplicado');
+        return;
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' })
+        logger: pino({ level: 'silent' }),
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log('ESCANEA EL QR:');
-            qrcode.generate(qr, { small: true });
+            qrCode = qr; // Guardamos el QR aquí
+            status = 'disconnected';
+            log('QR generado, esperando escaneo');
+        }
+
+        if (connection === 'open') {
+            status = 'connected';
+            qrCode = null; // Ya no necesitamos el QR
+            log('CONEXIÓN EXITOSA');
         }
 
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) connectToWhatsApp();
-        } else if (connection === 'open') {
-            console.log('¡CONEXIÓN EXITOSA! EL BOT ESTÁ LISTO.');
+            const code = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = code !== DisconnectReason.loggedOut;
+
+            log(`Conexión cerrada (${lastDisconnect?.error?.message})`);
+
+            // 🔥 CLAVE: liberar socket ANTES de reconectar
+            sock = null;
+
+            if (shouldReconnect) {
+                log('⚠️ Reconectando...');
+                setTimeout(() => {
+                    connectToWhatsApp();
+                }, 4000);
+            } else {
+                log('CRITICAL', 'Logout real detectado, requiere QR');
+            }
         }
     });
 
@@ -45,78 +73,71 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp();
 
-// --- FUNCIÓN AUXILIAR PARA FORMATEAR NÚMEROS ---
+// ================= ENDPOINTS =================
+
+app.get('/status', (req, res) => {
+    res.json({
+        status: status,
+        qr: qrCode // Enviar el QR al frontend
+    });
+});
+
 const formatNumber = (numero) => {
-    let numeroLimpio = numero.replace(/\D/g, '');
-    if (numeroLimpio.startsWith('0')) {
-        numeroLimpio = '58' + numeroLimpio.substring(1); // Ajuste Venezuela
-    }
-    return `${numeroLimpio}@s.whatsapp.net`;
+    let n = numero.replace(/\D/g, '');
+    if (n.startsWith('0')) n = '58' + n.slice(1);
+    return `${n}@s.whatsapp.net`;
 };
 
-// --- ENDPOINT 1: SOLO TEXTO (El que ya tenías) ---
+// Enviar mensaje de texto
 app.post('/enviar-mensaje', async (req, res) => {
     const { numero, mensaje } = req.body;
-
-    if (!numero || !mensaje) {
-        return res.status(400).json({ error: 'Faltan datos' });
-    }
+    if (!numero || !mensaje) return res.status(400).json({ error: 'Faltan datos' });
 
     try {
-        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
+        if (status !== 'connected' || !sock) return res.status(503).json({ error: 'Bot desconectado' });
 
         const idWhatsapp = formatNumber(numero);
-        
-        // Verificar si existe (opcional, consume tiempo)
         const [onWhatsApp] = await sock.onWhatsApp(idWhatsapp);
+        
         if (!onWhatsApp || !onWhatsApp.exists) {
              return res.status(404).json({ error: 'El número no tiene WhatsApp' });
         }
 
+        log(`Enviando mensaje a ${numero}: ${mensaje}`);
         await sock.sendMessage(idWhatsapp, { text: mensaje });
-        console.log(`Texto enviado a ${numero}`);
         res.json({ status: 'ok' });
-
     } catch (error) {
-        console.error('Error:', error);
+        log(`Error al enviar mensaje: ${error.message}`);
         res.status(500).json({ error: 'Error interno' });
     }
 });
 
-// --- ENDPOINT 2: IMAGEN + TEXTO (El nuevo para el Ticket) ---
-// 'media' es el nombre del campo que pusimos en el FormData del frontend
+// Enviar mensaje con imagen
 app.post('/enviar-mensaje-media', upload.single('media'), async (req, res) => {
-    // Multer pone los campos de texto en req.body y el archivo en req.file
     const { numero, mensaje } = req.body;
     const file = req.file;
 
-    if (!numero || !file) {
-        return res.status(400).json({ error: 'Faltan datos (numero o archivo media)' });
-    }
+    if (!numero || !file) return res.status(400).json({ error: 'Faltan datos' });
 
     try {
-        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
-
+        if (status !== 'connected' || !sock) return res.status(503).json({ error: 'Bot desconectado' });
         const idWhatsapp = formatNumber(numero);
 
-        // Enviar imagen (Baileys acepta el Buffer directamente)
+        log(`Enviando imagen a ${numero}: ${mensaje}`);
         await sock.sendMessage(idWhatsapp, { 
             image: file.buffer, 
-            caption: mensaje || '' // El texto va como caption
+            caption: mensaje || '' 
         });
 
-        console.log(`Imagen enviada a ${numero}`);
         res.json({ status: 'ok', mensaje: 'Imagen enviada' });
-
     } catch (error) {
-        console.error('Error enviando media:', error);
+        log(`Error al enviar imagen: ${error.message}`);
         res.status(500).json({ error: 'Error interno al enviar media' });
     }
 });
 
-app.get('/', (req, res) => res.send('EL BOT ESTÁ VIVO 🤖'));
+app.get('/', (_, res) => res.send('BOT ACTIVO'));
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`Servidor API escuchando en puerto ${port}`);
+app.listen(process.env.PORT || 3000, () => {
+    log('Servidor iniciado');
 });
