@@ -11,7 +11,7 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const NodeCache = require('node-cache'); // NECESITAS INSTALAR ESTO: npm install node-cache
+const NodeCache = require('node-cache'); 
 
 const app = express();
 app.use(express.json());
@@ -50,6 +50,12 @@ const clearAuthFolder = () => {
 
 // --- LÓGICA PRINCIPAL ---
 async function connectToWhatsApp() {
+
+    if (sock?.ws?.readyState === 1) {
+        log('WARNING', '⚠️ Socket activo detectado, evitando doble conexión');
+        return;
+    }
+    
     status = 'connecting';
     
     // 1. Obtener última versión de Baileys para evitar bugs antiguos
@@ -101,10 +107,20 @@ async function connectToWhatsApp() {
             
             // CASO 1: Logged Out (401) -> EL ÚNICO CASO DONDE BORRAMOS
             if (statusCode === DisconnectReason.loggedOut) {
-                log('CRITICAL', '⛔ La sesión fue cerrada desde el dispositivo. Limpiando...');
-                clearAuthFolder();
-                setTimeout(connectToWhatsApp, 3000);
-            } 
+                const msg = error?.message?.toLowerCase() || '';
+
+                // 🔒 SOLO borrar sesión si ES logout REAL
+                if (msg.includes('logged out')) {
+                    log('CRITICAL', '⛔ Logout REAL detectado. Limpiando sesión...');
+                    clearAuthFolder();
+                    setTimeout(connectToWhatsApp, 3000);
+                } else {
+                    // ⚠️ Conflict / stream error / cambio de cuenta / red
+                    log('WARNING', '⚠️ 401 Conflict detectado. NO es logout real. Reintentando sin borrar sesión...');
+                    setTimeout(connectToWhatsApp, 3000);
+                }
+            }
+
             // CASO 2: Restart Required (515) -> SÚPER COMÚN, NO ES ERROR GRAVE
             else if (statusCode === DisconnectReason.restartRequired) {
                 log('INFO', '🔄 Reinicio requerido por WhatsApp (Normal). Reconectando inmediatamente...');
