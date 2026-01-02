@@ -57,11 +57,12 @@ async function connectToWhatsApp() {
             // 🔥 CLAVE: liberar socket ANTES de reconectar
             sock = null;
 
+            // Si es un conflicto o error de stream, reconectar
             if (shouldReconnect) {
                 log('⚠️ Reconectando...');
                 setTimeout(() => {
                     connectToWhatsApp();
-                }, 4000);
+                }, 8000);  // Espera más tiempo para reconectar
             } else {
                 log('CRITICAL', 'Logout real detectado, requiere QR');
             }
