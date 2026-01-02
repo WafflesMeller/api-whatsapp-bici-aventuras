@@ -50,99 +50,47 @@ const clearAuthFolder = () => {
 
 // --- LÓGICA PRINCIPAL ---
 async function connectToWhatsApp() {
-
-    if (sock?.ws?.readyState === 1) {
-        log('WARNING', '⚠️ Socket activo detectado, evitando doble conexión');
-        return;
-    }
-    
-    status = 'connecting';
-    
-    // 1. Obtener última versión de Baileys para evitar bugs antiguos
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    log('INFO', `Usando WA v${version.join('.')}, ¿Es la última?: ${isLatest}`);
-
-    // 2. Cargar estado
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    // 3. Configuración ROBUSTA del Socket
     sock = makeWASocket({
-        version,
-        auth: {
-            creds: state.creds,
-            // Usamos caché para las llaves, esto evita lecturas de disco constantes en Render
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
-        },
-        printQRInTerminal: true, 
-        logger: pino({ level: 'silent' }), 
-        browser: ["BiciAventuras Bot", "Chrome", "120.0.0"], // Navegador moderno simulado
-        
-        // --- BLINDAJE DE CONEXIÓN ---
-        connectTimeoutMs: 60000, 
-        keepAliveIntervalMs: 30000, // Ping cada 30s para que no se caiga
-        retryRequestDelayMs: 2000,  // Espera un poco antes de reintentar peticiones fallidas
-        msgRetryCounterCache,       // Maneja mensajes fallidos sin desconectar
-        generateHighQualityLinkPreview: true,
+        auth: state,
+        logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            qrCode = qr;
+            qrCode = qr;          // ← para tu app
             status = 'disconnected';
-            log('WARNING', '🔍 QR Generado. Escanea para vincular.');
+            log('WARNING', 'QR generado, esperando escaneo');
         }
 
         if (connection === 'close') {
-            const error = lastDisconnect?.error;
-            const statusCode = error?.output?.statusCode;
-            
-            status = 'disconnected';
-            qrCode = null;
+            const shouldReconnect =
+                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
-            log('ERROR', `Conexión cerrada. Código: ${statusCode} | Razón: ${error?.message || 'Desconocida'}`);
+            log('ERROR', `Conexión cerrada (${lastDisconnect?.error?.message})`);
 
-            // --- LÓGICA INTELIGENTE DE RECONEXIÓN ---
-            
-            // CASO 1: Logged Out (401) -> EL ÚNICO CASO DONDE BORRAMOS
-            if (statusCode === DisconnectReason.loggedOut) {
-                const msg = error?.message?.toLowerCase() || '';
-
-                // 🔒 SOLO borrar sesión si ES logout REAL
-                if (msg.includes('logged out')) {
-                    log('CRITICAL', '⛔ Logout REAL detectado. Limpiando sesión...');
-                    clearAuthFolder();
-                    setTimeout(connectToWhatsApp, 3000);
-                } else {
-                    // ⚠️ Conflict / stream error / cambio de cuenta / red
-                    log('WARNING', '⚠️ 401 Conflict detectado. NO es logout real. Reintentando sin borrar sesión...');
-                    setTimeout(connectToWhatsApp, 3000);
-                }
-            }
-
-            // CASO 2: Restart Required (515) -> SÚPER COMÚN, NO ES ERROR GRAVE
-            else if (statusCode === DisconnectReason.restartRequired) {
-                log('INFO', '🔄 Reinicio requerido por WhatsApp (Normal). Reconectando inmediatamente...');
+            if (shouldReconnect) {
+                // 🔥 MISMO COMPORTAMIENTO QUE EL CÓDIGO VIEJO
                 connectToWhatsApp();
+            } else {
+                log('CRITICAL', 'Logout real detectado');
+                clearAuthFolder();
             }
-            // CASO 3: Timed Out (408) o Connection Lost (440/500)
-            else {
-                log('NETWORK', '⚠️ Pérdida de conexión temporal. Reintentando en 2s...');
-                setTimeout(connectToWhatsApp, 2000);
-            }
-        } 
-        
-        else if (connection === 'open') {
-            log('SUCCESS', '🚀 ¡CONEXIÓN ESTABILIZADA! (Keep-Alive Activo)');
+        }
+
+        if (connection === 'open') {
             status = 'connected';
             qrCode = null;
+            log('SUCCESS', '¡CONEXIÓN EXITOSA!');
         }
     });
 
-    // Guardar credenciales solo cuando cambian
     sock.ev.on('creds.update', saveCreds);
 }
+
 
 // Arrancar
 connectToWhatsApp();
