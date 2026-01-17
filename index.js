@@ -35,7 +35,7 @@ async function connectToWhatsApp() {
         sock = makeWASocket({
             auth: state,
             logger: pino({ level: 'silent' }),
-            browser: ['MegaPixelBot', 'Chrome', '1.0.0'],
+            browser: ['BiciAventurasBot', 'Chrome', '1.0.0'],
             markOnlineOnConnect: true,
             syncFullHistory: false,
             keepAliveIntervalMs: 20_000,
