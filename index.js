@@ -1,142 +1,60 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
+const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const cors = require('cors');
-const multer = require('multer');
+const multer = require('multer'); // <--- NUEVO: Importamos Multer
 
-// ================== APP ==================
 const app = express();
 app.use(express.json());
 app.use(cors());
 
+// --- CONFIGURACIÓN DE MULTER (Para recibir archivos) ---
+// Usamos memoryStorage para guardar la imagen en la RAM temporalmente (más rápido en Render)
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ================== ESTADO GLOBAL ==================
-let sock = null;
-let status = 'disconnected'; // disconnected | connecting | connected
-let qrCode = null;
-let isConnecting = false;
-let reconnectAttempts = 0;
+let sock;
 
-// ================== LOGGER ==================
-const log = (msg) => {
-    console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
-};
-
-// ================== CONEXIÓN WHATSAPP ==================
 async function connectToWhatsApp() {
-    if (isConnecting) return;
-    isConnecting = true;
-    status = 'connecting';
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' })
+    });
 
-        sock = makeWASocket({
-            auth: state,
-            logger: pino({ level: 'silent' }),
-            browser: ['BiciAventurasBot', 'Chrome', '1.0.0'],
-            markOnlineOnConnect: true,
-            syncFullHistory: false,
-            keepAliveIntervalMs: 20_000,
-        });
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-        sock.ev.on('creds.update', saveCreds);
+        if (qr) {
+            console.log('ESCANEA EL QR:');
+            qrcode.generate(qr, { small: true });
+        }
 
-        sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect, qr } = update;
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) connectToWhatsApp();
+        } else if (connection === 'open') {
+            console.log('¡CONEXIÓN EXITOSA! EL BOT ESTÁ LISTO.');
+        }
+    });
 
-            if (qr) {
-                qrCode = qr;
-                status = 'disconnected';
-                log('QR generado, esperando escaneo');
-            }
-
-            if (connection === 'open') {
-                status = 'connected';
-                qrCode = null;
-                reconnectAttempts = 0;
-                isConnecting = false;
-                log('CONEXIÓN ESTABLECIDA Y ACTIVA');
-            }
-
-            if (connection === 'close') {
-                const code = lastDisconnect?.error?.output?.statusCode;
-                const reason = lastDisconnect?.error?.message || 'Desconocido';
-
-                log(`Conexión cerrada: ${reason}`);
-
-                sock = null;
-                status = 'disconnected';
-                isConnecting = false;
-
-                if (code === DisconnectReason.loggedOut) {
-                    log('❌ LOGOUT REAL. Se requiere nuevo QR.');
-                    return;
-                }
-
-                if (code === DisconnectReason.conflict) {
-                    log('⚠️ CONFLICTO DE SESIÓN detectado');
-                }
-
-                const delay = Math.min(10_000 + reconnectAttempts * 5_000, 60_000);
-                reconnectAttempts++;
-
-                log(`Reintentando conexión en ${delay / 1000}s...`);
-
-                setTimeout(() => {
-                    connectToWhatsApp();
-                }, delay);
-            }
-        });
-
-    } catch (error) {
-        log(`Error crítico al conectar: ${error.message}`);
-        sock = null;
-        status = 'disconnected';
-        isConnecting = false;
-
-        setTimeout(() => {
-            connectToWhatsApp();
-        }, 15_000);
-    }
+    sock.ev.on('creds.update', saveCreds);
 }
 
-// ================== KEEP ALIVE REAL ==================
-setInterval(async () => {
-    try {
-        if (sock && status === 'connected') {
-            await sock.sendPresenceUpdate('available');
-            log('Keep-alive enviado');
-        }
-    } catch (err) {
-        log('Error en keep-alive');
-    }
-}, 5 * 60 * 1000); // cada 5 minutos
-
-// ================== INICIAR BOT ==================
 connectToWhatsApp();
 
-// ================== ENDPOINTS ==================
-
-app.get('/', (_, res) => {
-    res.send('BOT ACTIVO');
-});
-
-app.get('/status', (req, res) => {
-    res.json({
-        status,
-        qr: qrCode
-    });
-});
-
+// --- FUNCIÓN AUXILIAR PARA FORMATEAR NÚMEROS ---
 const formatNumber = (numero) => {
-    let n = numero.replace(/\D/g, '');
-    if (n.startsWith('0')) n = '58' + n.slice(1);
-    return `${n}@s.whatsapp.net`;
+    let numeroLimpio = numero.replace(/\D/g, '');
+    if (numeroLimpio.startsWith('0')) {
+        numeroLimpio = '58' + numeroLimpio.substring(1); // Ajuste Venezuela
+    }
+    return `${numeroLimpio}@s.whatsapp.net`;
 };
 
-// ================== MENSAJE TEXTO ==================
+// --- ENDPOINT 1: SOLO TEXTO (El que ya tenías) ---
 app.post('/enviar-mensaje', async (req, res) => {
     const { numero, mensaje } = req.body;
 
@@ -144,61 +62,61 @@ app.post('/enviar-mensaje', async (req, res) => {
         return res.status(400).json({ error: 'Faltan datos' });
     }
 
-    if (!sock || status !== 'connected') {
-        return res.status(503).json({ error: 'Bot desconectado' });
-    }
-
     try {
-        const jid = formatNumber(numero);
-        const [onWhatsApp] = await sock.onWhatsApp(jid);
+        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
 
-        if (!onWhatsApp?.exists) {
-            return res.status(404).json({ error: 'El número no tiene WhatsApp' });
+        const idWhatsapp = formatNumber(numero);
+        
+        // Verificar si existe (opcional, consume tiempo)
+        const [onWhatsApp] = await sock.onWhatsApp(idWhatsapp);
+        if (!onWhatsApp || !onWhatsApp.exists) {
+             return res.status(404).json({ error: 'El número no tiene WhatsApp' });
         }
 
-        await sock.sendMessage(jid, { text: mensaje });
-        log(`Mensaje enviado a ${numero}`);
-
+        await sock.sendMessage(idWhatsapp, { text: mensaje });
+        console.log(`Texto enviado a ${numero}`);
         res.json({ status: 'ok' });
 
     } catch (error) {
-        log(`Error al enviar mensaje: ${error.message}`);
+        console.error('Error:', error);
         res.status(500).json({ error: 'Error interno' });
     }
 });
 
-// ================== MENSAJE IMAGEN ==================
+// --- ENDPOINT 2: IMAGEN + TEXTO (El nuevo para el Ticket) ---
+// 'media' es el nombre del campo que pusimos en el FormData del frontend
 app.post('/enviar-mensaje-media', upload.single('media'), async (req, res) => {
+    // Multer pone los campos de texto en req.body y el archivo en req.file
     const { numero, mensaje } = req.body;
     const file = req.file;
 
     if (!numero || !file) {
-        return res.status(400).json({ error: 'Faltan datos' });
-    }
-
-    if (!sock || status !== 'connected') {
-        return res.status(503).json({ error: 'Bot desconectado' });
+        return res.status(400).json({ error: 'Faltan datos (numero o archivo media)' });
     }
 
     try {
-        const jid = formatNumber(numero);
+        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
 
-        await sock.sendMessage(jid, {
-            image: file.buffer,
-            caption: mensaje || ''
+        const idWhatsapp = formatNumber(numero);
+
+        // Enviar imagen (Baileys acepta el Buffer directamente)
+        await sock.sendMessage(idWhatsapp, { 
+            image: file.buffer, 
+            caption: mensaje || '' // El texto va como caption
         });
 
-        log(`Imagen enviada a ${numero}`);
-        res.json({ status: 'ok' });
+        console.log(`Imagen enviada a ${numero}`);
+        res.json({ status: 'ok', mensaje: 'Imagen enviada' });
 
     } catch (error) {
-        log(`Error al enviar imagen: ${error.message}`);
+        console.error('Error enviando media:', error);
         res.status(500).json({ error: 'Error interno al enviar media' });
     }
 });
 
-// ================== SERVER ==================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    log(`Servidor iniciado en puerto ${PORT}`);
+app.get('/', (req, res) => res.send('EL BOT ESTÁ VIVO 🤖'));
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+    console.log(`Servidor API escuchando en puerto ${port}`);
 });
