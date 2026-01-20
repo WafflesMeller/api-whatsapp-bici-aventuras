@@ -6,22 +6,20 @@ const pino = require('pino');
 const cors = require('cors');
 const multer = require('multer');
 
+// 1. CREACIÓN DEL SERVIDOR
 const app = express();
-const server = http.createServer(app);
+const server = http.createServer(app); // <--- ESTO ES CRUCIAL
 
-// CORS permisivo para la API
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- CONFIGURACIÓN CRÍTICA DEL SOCKET ---
+// 2. SOCKET.IO SIN PATH (Usa el default /socket.io/)
 const io = new Server(server, {
   cors: {
-    origin: "*", 
-    methods: ["GET", "POST"],
-    credentials: true
+    origin: "*",
+    methods: ["GET", "POST"]
   },
-  // ¡BORRA LA LÍNEA DE "PATH"! Deja que use el default.
   transports: ['websocket', 'polling']
 });
 
@@ -30,7 +28,6 @@ let lastQr = null;
 
 io.on('connection', (socket) => {
   console.log('Cliente conectado ID:', socket.id);
-  
   if (sock?.user) {
     socket.emit('status', 'connected');
   } else if (lastQr) {
@@ -40,7 +37,6 @@ io.on('connection', (socket) => {
     socket.emit('status', 'connecting');
   }
 });
-
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   
