@@ -17,10 +17,12 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- CONFIGURACIÓN CRÍTICA DEL SOCKET ---
 const io = new Server(server, {
   cors: {
-    origin: "*", // Permitimos todo para que no falle por CORS
-    methods: ["GET", "POST"]
+    origin: "*", 
+    methods: ["GET", "POST"],
+    credentials: true
   },
-  transports: ['websocket', 'polling'] // Permitimos ambos
+  // ¡BORRA LA LÍNEA DE "PATH"! Deja que use el default.
+  transports: ['websocket', 'polling']
 });
 
 let sock = null;
