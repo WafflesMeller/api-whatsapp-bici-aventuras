@@ -20,7 +20,6 @@ const io = new Server(server, {
     origin: "*", // Permitimos todo para que no falle por CORS
     methods: ["GET", "POST"]
   },
-  path: '/socket.io/', // Esto DEBE coincidir con Nginx
   transports: ['websocket', 'polling'] // Permitimos ambos
 });
 
