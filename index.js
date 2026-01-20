@@ -3,120 +3,171 @@ const express = require('express');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const cors = require('cors');
-const multer = require('multer'); // <--- NUEVO: Importamos Multer
+const multer = require('multer');
 
 const app = express();
-app.use(express.json());
-app.use(cors());
 
-// --- CONFIGURACIÓN DE MULTER (Para recibir archivos) ---
-// Usamos memoryStorage para guardar la imagen en la RAM temporalmente (más rápido en Render)
+/* =======================
+   CORS CORRECTO (CLAVE)
+======================= */
+const allowedOrigins = [
+  'https://bici-aventuras-app.vercel.app',
+  'https://api.whatsapp-api-check.xyz'
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir curl / postman / server-side
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('CORS bloqueado'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  credentials: true
+}));
+
+// 👇 ESTO EVITA EL ERROR DEL PREFLIGHT
+app.options('*', cors());
+
+app.use(express.json());
+
+/* =======================
+   MULTER
+======================= */
 const upload = multer({ storage: multer.memoryStorage() });
 
-let sock;
+/* =======================
+   ESTADO GLOBAL
+======================= */
+let sock = null;
+let isConnecting = false;
 
+/* =======================
+   WHATSAPP
+======================= */
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+  if (isConnecting) return;
+  isConnecting = true;
 
-    sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' })
-    });
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+  sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: ['BiciAventuras', 'Chrome', '1.0.0']
+  });
 
-        if (qr) {
-            console.log('ESCANEA EL QR:');
-            qrcode.generate(qr, { small: true });
-        }
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) connectToWhatsApp();
-        } else if (connection === 'open') {
-            console.log('¡CONEXIÓN EXITOSA! EL BOT ESTÁ LISTO.');
-        }
-    });
+    if (qr) {
+      console.log('ESCANEA ESTE QR:');
+      qrcode.generate(qr, { small: true });
+    }
 
-    sock.ev.on('creds.update', saveCreds);
+    if (connection === 'open') {
+      console.log('✅ CONEXIÓN EXITOSA');
+      isConnecting = false;
+    }
+
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      console.log('⚠️ Conexión cerrada. Código:', code);
+
+      sock = null;
+      isConnecting = false;
+
+      if (code !== DisconnectReason.loggedOut) {
+        setTimeout(connectToWhatsApp, 5000);
+      } else {
+        console.log('❌ Logout real, requiere nuevo QR');
+      }
+    }
+  });
+
+  sock.ev.on('creds.update', saveCreds);
 }
 
 connectToWhatsApp();
 
-// --- FUNCIÓN AUXILIAR PARA FORMATEAR NÚMEROS ---
+/* =======================
+   HELPERS
+======================= */
 const formatNumber = (numero) => {
-    let numeroLimpio = numero.replace(/\D/g, '');
-    if (numeroLimpio.startsWith('0')) {
-        numeroLimpio = '58' + numeroLimpio.substring(1); // Ajuste Venezuela
-    }
-    return `${numeroLimpio}@s.whatsapp.net`;
+  let n = numero.replace(/\D/g, '');
+  if (n.startsWith('0')) n = '58' + n.slice(1);
+  return `${n}@s.whatsapp.net`;
 };
 
-// --- ENDPOINT 1: SOLO TEXTO (El que ya tenías) ---
+/* =======================
+   ENDPOINTS
+======================= */
+app.get('/', (_, res) => {
+  res.send('EL BOT ESTÁ VIVO 🤖');
+});
+
+/* ----- TEXTO ----- */
 app.post('/enviar-mensaje', async (req, res) => {
-    const { numero, mensaje } = req.body;
+  const { numero, mensaje } = req.body;
 
-    if (!numero || !mensaje) {
-        return res.status(400).json({ error: 'Faltan datos' });
-    }
+  if (!numero || !mensaje) {
+    return res.status(400).json({ error: 'Faltan datos' });
+  }
 
-    try {
-        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
+  if (!sock) {
+    return res.status(503).json({ error: 'Bot desconectado' });
+  }
 
-        const idWhatsapp = formatNumber(numero);
-        
-        // Verificar si existe (opcional, consume tiempo)
-        const [onWhatsApp] = await sock.onWhatsApp(idWhatsapp);
-        if (!onWhatsApp || !onWhatsApp.exists) {
-             return res.status(404).json({ error: 'El número no tiene WhatsApp' });
-        }
+  try {
+    const id = formatNumber(numero);
 
-        await sock.sendMessage(idWhatsapp, { text: mensaje });
-        console.log(`Texto enviado a ${numero}`);
-        res.json({ status: 'ok' });
+    await sock.sendMessage(id, { text: mensaje });
 
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ error: 'Error interno' });
-    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error enviando mensaje' });
+  }
 });
 
-// --- ENDPOINT 2: IMAGEN + TEXTO (El nuevo para el Ticket) ---
-// 'media' es el nombre del campo que pusimos en el FormData del frontend
+/* ----- IMAGEN ----- */
 app.post('/enviar-mensaje-media', upload.single('media'), async (req, res) => {
-    // Multer pone los campos de texto en req.body y el archivo en req.file
-    const { numero, mensaje } = req.body;
-    const file = req.file;
+  const { numero, mensaje } = req.body;
+  const file = req.file;
 
-    if (!numero || !file) {
-        return res.status(400).json({ error: 'Faltan datos (numero o archivo media)' });
-    }
+  if (!numero || !file) {
+    return res.status(400).json({ error: 'Faltan datos' });
+  }
 
-    try {
-        if (!sock) return res.status(500).json({ error: 'Bot desconectado' });
+  if (!sock) {
+    return res.status(503).json({ error: 'Bot desconectado' });
+  }
 
-        const idWhatsapp = formatNumber(numero);
+  try {
+    const id = formatNumber(numero);
 
-        // Enviar imagen (Baileys acepta el Buffer directamente)
-        await sock.sendMessage(idWhatsapp, { 
-            image: file.buffer, 
-            caption: mensaje || '' // El texto va como caption
-        });
+    await sock.sendMessage(id, {
+      image: file.buffer,
+      caption: mensaje || ''
+    });
 
-        console.log(`Imagen enviada a ${numero}`);
-        res.json({ status: 'ok', mensaje: 'Imagen enviada' });
-
-    } catch (error) {
-        console.error('Error enviando media:', error);
-        res.status(500).json({ error: 'Error interno al enviar media' });
-    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error enviando imagen' });
+  }
 });
 
-app.get('/', (req, res) => res.send('EL BOT ESTÁ VIVO 🤖'));
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`Servidor API escuchando en puerto ${port}`);
+/* =======================
+   SERVER
+======================= */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 API escuchando en puerto ${PORT}`);
 });
