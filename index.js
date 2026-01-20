@@ -31,13 +31,17 @@ app.use(cors({
   credentials: true
 }));
 
-// 👇 ESTO EVITA EL ERROR DEL PREFLIGHT
-app.options('*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.send();
+// ✅ MANEJO CORRECTO DE PREFLIGHT (SIN '*')
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
+    return res.sendStatus(204);
+  }
+  next();
 });
+
 
 app.use(express.json());
 
