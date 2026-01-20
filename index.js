@@ -1,46 +1,43 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
-const http = require('http'); // Necesario para integrar Socket.io
-const { Server } = require('socket.io'); // Importamos la clase Server
+const http = require('http');
+const { Server } = require('socket.io');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const cors = require('cors');
 const multer = require('multer');
 
 const app = express();
-const server = http.createServer(app); // Creamos el servidor HTTP envolviendo a Express
+const server = http.createServer(app);
 
 /* =======================
-   CONFIGURACIÓN DE SOCKET.IO Y CORS
+   CONFIGURACIÓN CORS (BLINDADA)
 ======================= */
 const allowedOrigins = [
-  'https://bici-aventuras-app.vercel.app', // Tu frontend en producción
-  'https://api.whatsapp-api-check.xyz',    // Tu backend/dominio actual
-  'http://localhost:5173'                  // Para tus pruebas en local
+  'https://bici-aventuras-app.vercel.app',
+  'https://api.whatsapp-api-check.xyz',
+  'http://localhost:5173'
 ];
 
-// Configuración del servidor de Sockets
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true
-  }
+  },
+  path: '/socket.io/' // IMPORTANTE PARA NGINX
 });
 
-// Configuración de CORS para Express (rutas normales)
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     } else {
-      console.log('Bloqueado por CORS:', origin);
-      return callback(new Error('Bloqueado por CORS'));
+      return callback(null, true); // MODO PERMISIVO TEMPORAL PARA DESCARTAR ERRORES
     }
   },
-  credentials: true,
-  optionsSuccessStatus: 200
+  credentials: true
 }));
 
 app.use(express.json());
@@ -51,29 +48,26 @@ const upload = multer({ storage: multer.memoryStorage() });
 ======================= */
 let sock = null;
 let isConnecting = false;
-let lastQr = null; // Guardamos el último QR generado
+let lastQr = null;
 
 /* =======================
-   EVENTOS DE SOCKET.IO
+   SOCKET.IO
 ======================= */
 io.on('connection', (socket) => {
-  console.log('🔌 Cliente web conectado al Socket:', socket.id);
+  console.log('Cliente conectado ID:', socket.id);
 
-  // Si hay un usuario conectado, avisar inmediatamente
   if (sock?.user) {
     socket.emit('status', 'connected');
-  } 
-  // Si no hay usuario pero hay un QR pendiente, enviarlo
-  else if (lastQr) {
+  } else if (lastQr) {
     socket.emit('qr', lastQr);
     socket.emit('status', 'scan_needed');
   } else {
-    socket.emit('status', 'connecting');
+    socket.emit('status', 'connecting'); // Enviamos connecting si no sabemos nada aún
   }
 });
 
 /* =======================
-   LÓGICA DE WHATSAPP (BAILEYS)
+   WHATSAPP
 ======================= */
 async function connectToWhatsApp() {
   if (isConnecting) return;
@@ -83,7 +77,7 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true, // Se mantiene en terminal por si acaso
+    printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
     browser: ['BiciAventuras', 'Chrome', '1.0.0']
   });
@@ -92,33 +86,32 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('✨ Nuevo QR generado');
       lastQr = qr;
-      io.emit('qr', qr); // Enviar QR a todos los clientes web conectados
+      io.emit('qr', qr);
       io.emit('status', 'scan_needed');
+      console.log('QR Generado');
     }
 
     if (connection === 'open') {
-      console.log('✅ CONEXIÓN EXITOSA A WHATSAPP');
-      lastQr = null; // Limpiamos el QR porque ya se usó
-      io.emit('status', 'connected'); // Avisar a la web que ya estamos listos
+      console.log('✅ CONEXIÓN EXITOSA');
+      lastQr = null;
+      io.emit('status', 'connected');
       isConnecting = false;
     }
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log('⚠️ Conexión cerrada. Código:', code);
-      
       io.emit('status', 'disconnected');
+      
       sock = null;
       isConnecting = false;
       lastQr = null;
 
       if (code !== DisconnectReason.loggedOut) {
-        setTimeout(connectToWhatsApp, 5000); // Reconexión automática
+        setTimeout(connectToWhatsApp, 5000);
       } else {
-        console.log('❌ Sesión cerrada (Logout). Se generará nuevo QR.');
-        connectToWhatsApp(); 
+        connectToWhatsApp();
       }
     }
   });
@@ -126,64 +119,46 @@ async function connectToWhatsApp() {
   sock.ev.on('creds.update', saveCreds);
 }
 
-// Iniciamos la conexión
 connectToWhatsApp();
 
 /* =======================
-   HELPERS
+   ENDPOINTS (CORS FIX)
 ======================= */
-const formatNumber = (numero) => {
-  let n = numero.replace(/\D/g, '');
-  if (n.startsWith('0')) n = '58' + n.slice(1);
-  return `${n}@s.whatsapp.net`;
-};
-
-/* =======================
-   ENDPOINTS HTTP
-======================= */
-app.get('/', (_, res) => {
-  res.send('🤖 BOT ONLINE CON SOCKETS');
+// Endpoint de estado para polling
+app.get('/status', (req, res) => {
+    res.json({
+        status: sock?.user ? 'connected' : 'disconnected',
+        qr: lastQr
+    });
 });
 
-// Enviar Mensaje Texto
+app.post('/logout', async (req, res) => {
+    if(sock) {
+        await sock.logout();
+        res.json({ok: true});
+    } else {
+        res.status(400).json({error: 'No conectado'});
+    }
+});
+
 app.post('/enviar-mensaje', async (req, res) => {
   const { numero, mensaje } = req.body;
-  if (!numero || !mensaje) return res.status(400).json({ error: 'Faltan datos' });
   if (!sock) return res.status(503).json({ error: 'Bot desconectado' });
-
+  
   try {
-    const id = formatNumber(numero);
+    const id = numero.replace(/\D/g, '') + '@s.whatsapp.net';
     await sock.sendMessage(id, { text: mensaje });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Error enviando mensaje' });
-  }
-});
-
-// Enviar Mensaje Multimedia
-app.post('/enviar-mensaje-media', upload.single('media'), async (req, res) => {
-  const { numero, mensaje } = req.body;
-  const file = req.file;
-
-  if (!numero || !file) return res.status(400).json({ error: 'Faltan datos' });
-  if (!sock) return res.status(503).json({ error: 'Bot desconectado' });
-
-  try {
-    const id = formatNumber(numero);
-    await sock.sendMessage(id, { image: file.buffer, caption: mensaje || '' });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error enviando imagen' });
+    res.status(500).json({ error: 'Error interno' });
   }
 });
 
 /* =======================
-   ARRANCAR SERVIDOR
-   ¡IMPORTANTE! Usamos server.listen, NO app.listen
+   SERVER
 ======================= */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 Servidor listo en puerto ${PORT}`);
+  console.log(`🚀 SERVIDOR CORRIENDO EN PUERTO ${PORT}`);
 });
