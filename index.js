@@ -8,9 +8,8 @@ const multer = require('multer');
 const app = express();
 
 /* =======================
-   CORS CORRECTO (CLAVE)
+   CORS CORRECTO Y LIMPIO
 ======================= */
-// Manera segura de manejar CORS
 const allowedOrigins = [
   'https://bici-aventuras-app.vercel.app',
   'https://api.whatsapp-api-check.xyz'
@@ -18,32 +17,21 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir curl / postman / server-side
+    // Permitir solicitudes sin origen (como Postman, servidor a servidor o la misma terminal)
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     } else {
-      return callback(new Error('CORS bloqueado'));
+      console.log('🚫 Origen bloqueado por CORS:', origin);
+      return callback(new Error('No permitido por CORS policy'));
     }
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 200 // Importante para que el Preflight (OPTIONS) funcione bien en algunos navegadores
 }));
-
-
-// ✅ MANEJO CORRECTO DE PREFLIGHT (SIN '*')
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
-    return res.sendStatus(204);
-  }
-  next();
-});
-
 
 app.use(express.json());
 
