@@ -1,42 +1,20 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
 const pino = require('pino');
 const cors = require('cors');
 const multer = require('multer');
 
-// 1. CREACIÓN DEL SERVIDOR
 const app = express();
-const server = http.createServer(app); // <--- ESTO ES CRUCIAL
 
-app.use(cors({ origin: true, credentials: true }));
+// Configuración CORS simple
+app.use(cors());
 app.use(express.json());
-const upload = multer({ storage: multer.memoryStorage() });
 
-// 2. SOCKET.IO SIN PATH (Usa el default /socket.io/)
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  },
-  transports: ['websocket', 'polling']
-});
-
+// VARIABLES GLOBALES PARA GUARDAR EL ESTADO
 let sock = null;
-let lastQr = null;
+let status = 'starting'; // starting, scan_needed, connected, disconnected
+let currentQR = null;
 
-io.on('connection', (socket) => {
-  console.log('Cliente conectado ID:', socket.id);
-  if (sock?.user) {
-    socket.emit('status', 'connected');
-  } else if (lastQr) {
-    socket.emit('qr', lastQr);
-    socket.emit('status', 'scan_needed');
-  } else {
-    socket.emit('status', 'connecting');
-  }
-});
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   
@@ -51,39 +29,74 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      lastQr = qr;
-      io.emit('qr', qr);
-      io.emit('status', 'scan_needed');
-      console.log('Nuevo QR generado');
+      status = 'scan_needed';
+      currentQR = qr;
+      console.log('NUEVO QR GENERADO');
     }
 
     if (connection === 'open') {
       console.log('CONEXIÓN EXITOSA');
-      lastQr = null;
-      io.emit('status', 'connected');
+      status = 'connected';
+      currentQR = null;
     }
 
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      io.emit('status', 'disconnected');
-      if (shouldReconnect) connectToWhatsApp();
+      status = 'disconnected';
+      currentQR = null;
+      console.log('DESCONECTADO');
+      
+      if (shouldReconnect) {
+        connectToWhatsApp();
+      }
     }
   });
 
   sock.ev.on('creds.update', saveCreds);
 }
 
+// Iniciar WhatsApp
 connectToWhatsApp();
 
-// Endpoints
-app.get('/', (req, res) => res.send('Bot Activo'));
+// --- ENDPOINTS (API) ---
 
-app.post('/enviar-mensaje', async (req, res) => {
-    if(!sock) return res.status(500).json({error: 'Bot desconectado'});
-    const { numero, mensaje } = req.body;
-    const id = numero.replace(/\D/g, '') + '@s.whatsapp.net';
-    await sock.sendMessage(id, { text: mensaje });
-    res.json({ok: true});
+// 1. Endpoint para que el Frontend pregunte el estado (Polling)
+app.get('/status', (req, res) => {
+    res.json({
+        status: status,
+        qr: currentQR
+    });
 });
 
-server.listen(3000, () => console.log('Servidor en puerto 3000'));
+// 2. Endpoint para enviar mensaje
+app.post('/enviar-mensaje', async (req, res) => {
+    if (status !== 'connected' || !sock) {
+        return res.status(503).json({ error: 'Bot no conectado' });
+    }
+    const { numero, mensaje } = req.body;
+    try {
+        const id = numero.replace(/\D/g, '') + '@s.whatsapp.net';
+        await sock.sendMessage(id, { text: mensaje });
+        res.json({ ok: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Error al enviar' });
+    }
+});
+
+// 3. Endpoint para cerrar sesión
+app.post('/logout', async (req, res) => {
+    try {
+        if (sock) await sock.logout();
+        status = 'disconnected';
+        currentQR = null;
+        res.json({ ok: true });
+        // Reiniciamos el proceso para generar nuevo QR
+        setTimeout(connectToWhatsApp, 2000); 
+    } catch (e) {
+        res.status(500).json({ error: 'Error logout' });
+    }
+});
+
+const PORT = 3000;
+app.listen(PORT, () => console.log(`API HTTP corriendo en puerto ${PORT}`));
